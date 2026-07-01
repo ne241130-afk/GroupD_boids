@@ -12,22 +12,22 @@ visualizer = SwarmVisualizer()
 # シミュレーションパラメタ
 N = 256
 # 力の強さ
-COHESION_FORCE = 0. #0.008を0.03に変更→群れが大きな塊になっていく。
-SEPARATION_FORCE = 0.9 #分離の力。下げると分離力が下がり１つの塊になる。
-ALIGNMENT_FORCE = 0 #0.5に上げると結合する。
+COHESION_FORCE = 0.015 #0.008を0.03に変更→群れが大きな塊になっていく。
+SEPARATION_FORCE = 0.2 #分離の力。下げると分離力が下がり１つの塊になる。
+ALIGNMENT_FORCE = 0.2 #0.5に上げると結合する。
 # 力の働く距離
-COHESION_DISTANCE = 0.5
+COHESION_DISTANCE = 0.7
 SEPARATION_DISTANCE = 0.05
-ALIGNMENT_DISTANCE = 0.1
+ALIGNMENT_DISTANCE = 0.3
 # 力の働く角度
 COHESION_ANGLE = np.pi / 2
-SEPARATION_ANGLE = np.pi
+SEPARATION_ANGLE = np.pi / 2
 ALIGNMENT_ANGLE = np.pi / 3
 # 速度の上限/下限
 MIN_VEL = 0.001
-MAX_VEL = 1
+MAX_VEL = 0.02
 # 境界で働く力（0にすると自由境界）
-BOUNDARY_FORCE = 0.0001
+BOUNDARY_FORCE = 0.001
 
 # 位置と速度
 x = np.random.rand(N, 3) * 2 - 1
