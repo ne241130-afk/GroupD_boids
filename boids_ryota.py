@@ -12,9 +12,9 @@ visualizer = SwarmVisualizer()
 # シミュレーションパラメタ
 N = 256
 # 力の強さ
-COHESION_FORCE = 0.008
-SEPARATION_FORCE = 0.4
-ALIGNMENT_FORCE = 0.06
+COHESION_FORCE = 0.02 #0.008を0.03に変更→群れが大きな塊になっていく。
+SEPARATION_FORCE = 0.2 #分離の力。下げると分離力が下がり１つの塊になる。
+ALIGNMENT_FORCE = 0.15 #0.5に上げると結合する。
 # 力の働く距離
 COHESION_DISTANCE = 0.5
 SEPARATION_DISTANCE = 0.05
