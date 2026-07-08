@@ -26,6 +26,7 @@ ALIGNMENT_ANGLE = np.pi / 3
 # 速度の上限/下限
 MIN_VEL = 0.005
 MAX_VEL = 0.03
+LEADER_SPEED = MAX_VEL
 # 境界で働く力（0にすると自由境界）
 BOUNDARY_FORCE = 0.005
 # リーダー個体が他個体を引き寄せる力
@@ -33,8 +34,8 @@ LEADER_ATTRACTION_FORCE = 0.003
 LEADER_ATTRACTION_DISTANCE = 1.5
 LEADER_ANGLE = np.pi
 # 嫌われ者個体から逃げる力
-OUTCAST_AVOIDANCE_FORCE = 1.4
-OUTCAST_AVOIDANCE_DISTANCE = 0.1
+OUTCAST_AVOIDANCE_FORCE = 2.0
+OUTCAST_AVOIDANCE_DISTANCE = 0.5
 OUTCAST_ANGLE = np.pi
 # 嫌われ者自身がグループから離れる力
 OUTCAST_ESCAPE_FORCE = 0.6
@@ -73,6 +74,8 @@ is_leader[0] = True
 for i in range(5):
     start = i * group_size
     is_outcast[start + 1] = True
+leader_v_abs = np.linalg.norm(v[is_leader], axis=1)
+v[is_leader] = LEADER_SPEED * v[is_leader] / leader_v_abs[:, np.newaxis]
 
 # 表示色（通常: 灰色, リーダー: 赤, 嫌われ者: 青）
 colors = np.full((N, 4), 0.7)
@@ -129,7 +132,9 @@ while visualizer:
     v += dv_coh + dv_sep + dv_ali + dv_leader + dv_outcast + dv_boundary
     for i in range(N):
         v_abs = np.linalg.norm(v[i])
-        if (v_abs < MIN_VEL):
+        if is_leader[i]:
+            v[i] = LEADER_SPEED * v[i] / v_abs if (v_abs > 0) else np.array([LEADER_SPEED, 0, 0])
+        elif (v_abs < MIN_VEL):
             v[i] = MIN_VEL * v[i] / v_abs
         elif (v_abs > MAX_VEL):
             v[i] = MAX_VEL * v[i] / v_abs
