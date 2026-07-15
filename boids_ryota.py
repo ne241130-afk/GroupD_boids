@@ -19,13 +19,15 @@ MIN_VEL = 0.006
 MAX_VEL = 0.026
 
 # Basic Boids forces
-COHESION_FORCE = 0.0015
+COHESION_FORCE = 0.0075
 SEPARATION_FORCE = 0.020
-ALIGNMENT_FORCE = 0.035
+ALIGNMENT_FORCE = 0.050
 COHESION_DISTANCE = 0.25
 SEPARATION_DISTANCE = 0.045
 ALIGNMENT_DISTANCE = 0.18
 BOUNDARY_FORCE = 0.010
+WANDER_FORCE = 0.0018
+WANDER_ANGLE_STD = np.pi / 7
 
 # Pheromone field
 GRID_SIZE = 180
@@ -33,8 +35,11 @@ EVAPORATION_RATE = 0.990
 DIFFUSION_RATE = 0.090
 GROUP_PHEROMONE_DEPOSIT = 0.020
 FOOD_PHEROMONE_DEPOSIT = 0.120
+TRAIL_PHEROMONE_DEPOSIT = 0.012
 ALARM_PHEROMONE_DEPOSIT = 0.090
 DEPOSIT_RADIUS = 2
+VECTOR_DEPOSIT_DISTANCE = 7
+VECTOR_DEPOSIT_ANGLE = np.pi / 6
 FRAME_DT = 1.0 / 60.0
 PHEROMONE_EVAPORATION_DELAY_SECONDS = 5.0
 PHEROMONE_LIFETIME_FRAMES = int(PHEROMONE_EVAPORATION_DELAY_SECONDS / FRAME_DT)
@@ -42,12 +47,18 @@ PHEROMONE_LIFETIME_FRAMES = int(PHEROMONE_EVAPORATION_DELAY_SECONDS / FRAME_DT)
 # Pheromone is generated only when local interaction occurs.
 GROUP_PHEROMONE_MIN_NEIGHBORS = 5
 GROUP_PHEROMONE_DISTANCE = 0.08
+GROUP_PHEROMONE_REQUIRED_SECONDS = 1.2
+GROUP_PHEROMONE_REQUIRED_FRAMES = int(GROUP_PHEROMONE_REQUIRED_SECONDS / FRAME_DT)
+GROUP_CONTACT_DECAY = 2
 
 # Pheromone sensing
 SENSOR_DISTANCE = 0.105
 SENSOR_ANGLE = np.pi / 4
-ATTRACT_PHEROMONE_FORCE = 0.0085
+ATTRACT_PHEROMONE_FORCE = 0.0022
+TRAIL_PHEROMONE_FORCE = 0.0035
+GROUP_PHEROMONE_FORCE = 0.0025
 ALARM_PHEROMONE_FORCE = 0.013
+PHEROMONE_DIRECTION_SHARPNESS = 2.0
 
 # Optional food / danger system
 FOOD_POSITIONS = np.array([
@@ -57,12 +68,16 @@ FOOD_POSITIONS = np.array([
 DANGER_POSITIONS = np.array([
     [0.18, -0.62],
 ])
-FOOD_REACTION_LIMIT = 1000
+FOOD_RESOURCE_CAPACITY = 100
+FOOD_REACTION_LIMIT = FOOD_RESOURCE_CAPACITY
 DANGER_SPEED = 0.004
 FOOD_DETECTION_RADIUS = 0.16
+FOOD_ATTRACTION_RADIUS = 0.30
 DANGER_DETECTION_RADIUS = 0.18
-FOOD_ATTRACTION_FORCE = 0.004
-DANGER_AVOIDANCE_FORCE = 0.018
+FOOD_ATTRACTION_FORCE = 0.002
+FOOD_LEAVE_FORCE = 0.018
+FOOD_DEPARTURE_TRAIL_MULTIPLIER = 4.0
+DANGER_AVOIDANCE_FORCE = 0.035
 
 # Display
 CANVAS_SIZE = 720
@@ -128,6 +143,25 @@ def sample_pheromone(field, position):
     return field[gy, gx]
 
 
+def create_pheromone_layer():
+    """Create amount, direction, and age fields for one pheromone type."""
+    return {
+        'amount': np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32),
+        'direction_x': np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32),
+        'direction_y': np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32),
+        'age': np.full((GRID_SIZE, GRID_SIZE), PHEROMONE_LIFETIME_FRAMES, dtype=np.float32),
+    }
+
+
+def sample_vector_pheromone(layer, position):
+    """Read amount and direction from a vector pheromone layer."""
+    gx, gy = world_to_grid(position)
+    amount = layer['amount'][gy, gx]
+    age = layer['age'][gy, gx]
+    direction = np.array([layer['direction_x'][gy, gx], layer['direction_y'][gy, gx]])
+    return amount, normalize(direction), age
+
+
 def deposit_pheromone(field, position, amount):
     """Deposit pheromone around a position using a small radial kernel."""
     gx, gy = world_to_grid(position)
@@ -140,6 +174,48 @@ def deposit_pheromone(field, position, amount):
             y_index = gy + dy
             if 0 <= x_index < GRID_SIZE and 0 <= y_index < GRID_SIZE:
                 field[y_index, x_index] += amount * (1.0 - distance / (DEPOSIT_RADIUS + 1))
+
+
+def deposit_vector_pheromone(layer, position, velocity, amount):
+    """Deposit pheromone in a forward cone and store the movement direction."""
+    direction = normalize(velocity)
+    if np.linalg.norm(direction) == 0:
+        return
+
+    gx, gy = world_to_grid(position)
+    for dy in range(-VECTOR_DEPOSIT_DISTANCE, VECTOR_DEPOSIT_DISTANCE + 1):
+        for dx in range(-VECTOR_DEPOSIT_DISTANCE, VECTOR_DEPOSIT_DISTANCE + 1):
+            offset = np.array([dx, dy], dtype=float)
+            distance = np.linalg.norm(offset)
+            if distance == 0:
+                alignment = 1.0
+            elif distance <= VECTOR_DEPOSIT_DISTANCE:
+                alignment = np.dot(normalize(offset), direction)
+            else:
+                continue
+
+            if alignment < np.cos(VECTOR_DEPOSIT_ANGLE):
+                continue
+
+            x_index = gx + dx
+            y_index = gy + dy
+            if not (0 <= x_index < GRID_SIZE and 0 <= y_index < GRID_SIZE):
+                continue
+
+            weight = amount * (1.0 - distance / (VECTOR_DEPOSIT_DISTANCE + 1)) * max(alignment, 0.0)
+            old_amount = layer['amount'][y_index, x_index]
+            new_amount = old_amount + weight
+            if new_amount <= 0:
+                continue
+
+            layer['direction_x'][y_index, x_index] = (
+                layer['direction_x'][y_index, x_index] * old_amount + direction[0] * weight
+            ) / new_amount
+            layer['direction_y'][y_index, x_index] = (
+                layer['direction_y'][y_index, x_index] * old_amount + direction[1] * weight
+            ) / new_amount
+            layer['amount'][y_index, x_index] = new_amount
+            layer['age'][y_index, x_index] = 0.0
 
 
 def refresh_pheromone_age(age_field, position):
@@ -156,7 +232,7 @@ def refresh_pheromone_age(age_field, position):
 
 
 def diffuse_and_age(field, age_field):
-    """Diffuse pheromone, then evaporate cells that are older than 10 seconds."""
+    """Diffuse pheromone, then evaporate cells older than the configured delay."""
     neighbors = (
         np.roll(field, 1, axis=0) +
         np.roll(field, -1, axis=0) +
@@ -182,6 +258,26 @@ def diffuse_and_age(field, age_field):
     age_field[[0, -1], :] = PHEROMONE_LIFETIME_FRAMES
     age_field[:, [0, -1]] = PHEROMONE_LIFETIME_FRAMES
     field[field < 0.0001] = 0.0
+
+
+def diffuse_vector_layer(layer):
+    """Diffuse amount, direction, and age for one vector pheromone layer."""
+    diffuse_and_age(layer['amount'], layer['age'])
+    for key in ('direction_x', 'direction_y'):
+        neighbors = (
+            np.roll(layer[key], 1, axis=0) +
+            np.roll(layer[key], -1, axis=0) +
+            np.roll(layer[key], 1, axis=1) +
+            np.roll(layer[key], -1, axis=1)
+        ) * 0.25
+        layer[key][:] = layer[key] * (1.0 - DIFFUSION_RATE) + neighbors * DIFFUSION_RATE
+
+    direction_norm = np.sqrt(layer['direction_x'] ** 2 + layer['direction_y'] ** 2)
+    has_direction = direction_norm > 1e-6
+    layer['direction_x'][has_direction] /= direction_norm[has_direction]
+    layer['direction_y'][has_direction] /= direction_norm[has_direction]
+    layer['direction_x'][layer['amount'] <= 0] = 0.0
+    layer['direction_y'][layer['amount'] <= 0] = 0.0
 
 
 def local_neighbor_counts(positions):
@@ -247,6 +343,14 @@ def relocate_food(food_positions, food_reactions, food_index):
     food_reactions[food_index] = 0
 
 
+def food_departure_direction(position, velocity, food_position):
+    """Return the direction used after a Boid reacts to food."""
+    away_from_food = normalize(position - food_position)
+    if np.linalg.norm(away_from_food) == 0:
+        away_from_food = -normalize(velocity)
+    return normalize(away_from_food + 0.35 * normalize(velocity))
+
+
 def boids_force(index, positions, velocities):
     """Compute ordinary cohesion, separation, and alignment forces."""
     x_this = positions[index]
@@ -269,8 +373,8 @@ def boids_force(index, positions, velocities):
     return force
 
 
-def pheromone_force(position, velocity, attract_field, alarm_field):
-    """Steer toward attractive pheromone and away from alarm pheromone."""
+def pheromone_force(position, velocity, food_layer, group_layer, trail_layer, danger_layer):
+    """Steer using pheromone amount, pheromone direction, and freshness."""
     direction = normalize(velocity)
     if np.linalg.norm(direction) == 0:
         direction = np.array([1.0, 0.0])
@@ -281,19 +385,40 @@ def pheromone_force(position, velocity, attract_field, alarm_field):
         rotate_2d(direction, -SENSOR_ANGLE),
     ]
 
-    attract_values = []
-    alarm_values = []
+    force = np.zeros(2)
     for sensor_dir in sensor_dirs:
         sensor_pos = position + sensor_dir * SENSOR_DISTANCE
-        attract_values.append(sample_pheromone(attract_field, sensor_pos))
-        alarm_values.append(sample_pheromone(alarm_field, sensor_pos))
+        for layer, strength in (
+                (food_layer, ATTRACT_PHEROMONE_FORCE),
+                (group_layer, GROUP_PHEROMONE_FORCE),
+                (trail_layer, TRAIL_PHEROMONE_FORCE)):
+            amount, pheromone_direction, age = sample_vector_pheromone(layer, sensor_pos)
+            if amount <= 0:
+                continue
+            direction_similarity = max(0.0, np.dot(direction, pheromone_direction))
+            if direction_similarity <= 0:
+                continue
+            freshness = max(0.0, 1.0 - age / PHEROMONE_LIFETIME_FRAMES)
+            response = amount * (direction_similarity ** PHEROMONE_DIRECTION_SHARPNESS) * (0.3 + 0.7 * freshness)
+            force += strength * response * normalize(sensor_dir + pheromone_direction)
 
-    attract_values = np.array(attract_values)
-    alarm_values = np.array(alarm_values)
+        amount, danger_direction, age = sample_vector_pheromone(danger_layer, sensor_pos)
+        if amount > 0:
+            direction_similarity = max(0.0, np.dot(direction, danger_direction))
+            freshness = max(0.0, 1.0 - age / PHEROMONE_LIFETIME_FRAMES)
+            response = amount * (0.3 + 0.7 * direction_similarity) * (0.3 + 0.7 * freshness)
+            force -= ALARM_PHEROMONE_FORCE * response * sensor_dir
 
-    attract_direction = np.sum(np.array(sensor_dirs) * attract_values[:, np.newaxis], axis=0)
-    alarm_direction = np.sum(np.array(sensor_dirs) * alarm_values[:, np.newaxis], axis=0)
-    return ATTRACT_PHEROMONE_FORCE * attract_direction - ALARM_PHEROMONE_FORCE * alarm_direction
+    return force
+
+
+def wander_force(velocity):
+    """Add a small local random steering force for autonomous exploration."""
+    direction = normalize(velocity)
+    if np.linalg.norm(direction) == 0:
+        direction = np.array([1.0, 0.0])
+    wander_direction = rotate_2d(direction, np.random.normal(0.0, WANDER_ANGLE_STD))
+    return WANDER_FORCE * wander_direction
 
 
 def food_and_danger_force(position, food_positions, danger_positions):
@@ -304,6 +429,8 @@ def food_and_danger_force(position, food_positions, danger_positions):
         offset = food_pos - position
         distance = np.linalg.norm(offset)
         if distance < FOOD_DETECTION_RADIUS:
+            force -= FOOD_LEAVE_FORCE * normalize(offset)
+        elif distance < FOOD_ATTRACTION_RADIUS:
             force += FOOD_ATTRACTION_FORCE * normalize(offset)
 
     for danger_pos in danger_positions:
@@ -330,15 +457,18 @@ def boundary_force(position):
     return force
 
 
-def pheromone_image(attract_field, alarm_field):
-    """Create a white-yellow/red image from pheromone concentrations."""
-    attract = attract_field / (np.max(attract_field) + 1e-6)
-    alarm = alarm_field / (np.max(alarm_field) + 1e-6)
+def pheromone_image(food_layer, group_layer, trail_layer, danger_layer):
+    """Create a yellow trail/group/food image and a red danger image."""
+    food = food_layer['amount'] / (np.max(food_layer['amount']) + 1e-6)
+    group = group_layer['amount'] / (np.max(group_layer['amount']) + 1e-6)
+    trail = trail_layer['amount'] / (np.max(trail_layer['amount']) + 1e-6)
+    danger = danger_layer['amount'] / (np.max(danger_layer['amount']) + 1e-6)
+    attract = np.clip(food * 1.00 + group * 0.65 + trail * 0.45, 0, 1)
 
     image = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.float32)
-    image[..., 0] = np.clip(attract * 1.00 + alarm * 1.00, 0, 1)
-    image[..., 1] = np.clip(attract * 0.86 + alarm * 0.10, 0, 1)
-    image[..., 2] = np.clip(attract * 0.20 + alarm * 0.08, 0, 1)
+    image[..., 0] = np.clip(attract * 1.00 + danger * 1.00, 0, 1)
+    image[..., 1] = np.clip(attract * 0.86 + danger * 0.10, 0, 1)
+    image[..., 2] = np.clip(attract * 0.20 + danger * 0.08, 0, 1)
     return image
 
 
@@ -367,8 +497,9 @@ class PheromoneBoidsVisualizer(object):
         self._food.set_gl_state('translucent', depth_test=False)
         self._danger.set_gl_state('translucent', depth_test=False)
 
-    def update(self, positions, velocities, food_positions, danger_positions, attract_field, alarm_field):
-        self._image.set_data(pheromone_image(attract_field, alarm_field))
+    def update(self, positions, velocities, food_positions, danger_positions,
+               food_layer, group_layer, trail_layer, danger_layer):
+        self._image.set_data(pheromone_image(food_layer, group_layer, trail_layer, danger_layer))
         self._food.set_data(
             grid_to_display_3d(food_positions, 20),
             face_color=(0.1, 1.0, 0.2, 1.0),
@@ -406,47 +537,62 @@ def initialize_boids():
 
 def update_pheromones(
         positions,
+        velocities,
         food_positions,
         danger_positions,
         food_reactions,
-        attract_field,
-        alarm_field,
-        attract_age,
-        alarm_age):
-    """Deposit pheromone only for groups, food discovery, or danger discovery."""
+        group_contact_frames,
+        food_layer,
+        group_layer,
+        trail_layer,
+        danger_layer):
+    """Deposit vector pheromone for groups, food discovery, trails, and danger."""
     neighbor_counts = local_neighbor_counts(positions)
 
     for i, position in enumerate(positions):
         if neighbor_counts[i] >= GROUP_PHEROMONE_MIN_NEIGHBORS:
-            deposit_pheromone(attract_field, position, GROUP_PHEROMONE_DEPOSIT)
-            refresh_pheromone_age(attract_age, position)
+            group_contact_frames[i] += 1
+            if group_contact_frames[i] >= GROUP_PHEROMONE_REQUIRED_FRAMES:
+                deposit_vector_pheromone(group_layer, position, velocities[i], GROUP_PHEROMONE_DEPOSIT)
+                deposit_vector_pheromone(trail_layer, position, velocities[i], TRAIL_PHEROMONE_DEPOSIT)
+        else:
+            group_contact_frames[i] = max(0, group_contact_frames[i] - GROUP_CONTACT_DECAY)
 
         for food_index, food_pos in enumerate(food_positions):
             if np.linalg.norm(food_pos - position) < FOOD_DETECTION_RADIUS:
-                deposit_pheromone(attract_field, position, FOOD_PHEROMONE_DEPOSIT)
-                refresh_pheromone_age(attract_age, position)
+                departure_direction = food_departure_direction(position, velocities[i], food_pos)
+                deposit_vector_pheromone(food_layer, position, departure_direction, FOOD_PHEROMONE_DEPOSIT)
+                deposit_vector_pheromone(
+                    trail_layer,
+                    position,
+                    departure_direction,
+                    TRAIL_PHEROMONE_DEPOSIT * FOOD_DEPARTURE_TRAIL_MULTIPLIER
+                )
                 food_reactions[food_index] += 1
 
         for danger_pos in danger_positions:
             if np.linalg.norm(danger_pos - position) < DANGER_DETECTION_RADIUS:
-                deposit_pheromone(alarm_field, position, ALARM_PHEROMONE_DEPOSIT)
-                refresh_pheromone_age(alarm_age, position)
+                deposit_vector_pheromone(danger_layer, position, velocities[i], ALARM_PHEROMONE_DEPOSIT)
 
     for food_index in range(len(food_positions)):
         if food_reactions[food_index] >= FOOD_REACTION_LIMIT:
             relocate_food(food_positions, food_reactions, food_index)
 
-    diffuse_and_age(attract_field, attract_age)
-    diffuse_and_age(alarm_field, alarm_age)
+    diffuse_vector_layer(food_layer)
+    diffuse_vector_layer(group_layer)
+    diffuse_vector_layer(trail_layer)
+    diffuse_vector_layer(danger_layer)
 
 
-def step(positions, velocities, food_positions, danger_positions, attract_field, alarm_field):
+def step(positions, velocities, food_positions, danger_positions,
+         food_layer, group_layer, trail_layer, danger_layer):
     """Advance Boids by one frame using Boids and pheromone forces."""
     new_velocities = velocities.copy()
     for i in range(N):
         force = np.zeros(2)
         force += boids_force(i, positions, velocities)
-        force += pheromone_force(positions[i], velocities[i], attract_field, alarm_field)
+        force += wander_force(velocities[i])
+        force += pheromone_force(positions[i], velocities[i], food_layer, group_layer, trail_layer, danger_layer)
         force += food_and_danger_force(positions[i], food_positions, danger_positions)
         force += boundary_force(positions[i])
         new_velocities[i] = limit_velocity(velocities[i] + force)
@@ -461,34 +607,48 @@ def main():
     positions, velocities = initialize_boids()
     food_positions = FOOD_POSITIONS.copy()
     food_reactions = np.zeros(len(food_positions), dtype=int)
+    group_contact_frames = np.zeros(N, dtype=int)
     danger_positions = DANGER_POSITIONS.copy()
     danger_velocities = initialize_danger_velocities(danger_positions)
-    attract_pheromone = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
-    alarm_pheromone = np.zeros((GRID_SIZE, GRID_SIZE), dtype=np.float32)
-    attract_age = np.full((GRID_SIZE, GRID_SIZE), PHEROMONE_LIFETIME_FRAMES, dtype=np.float32)
-    alarm_age = np.full((GRID_SIZE, GRID_SIZE), PHEROMONE_LIFETIME_FRAMES, dtype=np.float32)
+    food_pheromone = create_pheromone_layer()
+    group_pheromone = create_pheromone_layer()
+    trail_pheromone = create_pheromone_layer()
+    danger_pheromone = create_pheromone_layer()
     visualizer = PheromoneBoidsVisualizer()
 
     while visualizer:
         move_danger_positions(danger_positions, danger_velocities)
         update_pheromones(
             positions,
+            velocities,
             food_positions,
             danger_positions,
             food_reactions,
-            attract_pheromone,
-            alarm_pheromone,
-            attract_age,
-            alarm_age
+            group_contact_frames,
+            food_pheromone,
+            group_pheromone,
+            trail_pheromone,
+            danger_pheromone
         )
-        step(positions, velocities, food_positions, danger_positions, attract_pheromone, alarm_pheromone)
+        step(
+            positions,
+            velocities,
+            food_positions,
+            danger_positions,
+            food_pheromone,
+            group_pheromone,
+            trail_pheromone,
+            danger_pheromone
+        )
         visualizer.update(
             positions,
             velocities,
             food_positions,
             danger_positions,
-            attract_pheromone,
-            alarm_pheromone
+            food_pheromone,
+            group_pheromone,
+            trail_pheromone,
+            danger_pheromone
         )
 
 
